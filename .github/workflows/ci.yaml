@@ -1,0 +1,174 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches:
+    - 'main'
+permissions:
+  contents: read
+  id-token: write
+defaults:
+  run:
+    working-directory: v2
+env:
+  go-version: "1.27.3"
+  cache-version: 1
+  # Supported Kubernetes versions. Bump these three values when adding/dropping
+  # versions; all matrix entries below reference the YAML anchors.
+  K8S_LATEST: &k8s-latest "1.36.4"
+  K8S_PREV1:  &k8s-prev1  "1.35.8"
+  K8S_PREV2:  &k8s-prev2  "1.34.11"
+jobs:
+  test:
+    name: Small test
+    strategy:
+      matrix:
+        test-ipam: ["true", "false"]
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.go-version }}
+        cache-dependency-path: "**/go.sum"
+    - uses: ./.github/actions/setup-takumi-guard
+      with:
+        bot-id: ${{ vars.TAKUMI_GUARD_BOT_ID }}
+    - name: Cache tools
+      id: cache-tools
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          v2/bin
+          v2/include
+        key: cache-${{ env.cache-version }}-go-${{ env.go-version }}-${{ hashFiles('v2/Makefile') }}
+    - uses: aquaproj/aqua-installer@82d0e83878a8657c4a6f2ff1755d3bfbfc67f329 # v4.1.0
+      with:
+        aqua_version: v2.64.0
+    - run: make setup
+      if: steps.cache-tools.outputs.cache-hit != 'true'
+    - run: make test TEST_IPAM=${{ matrix.test-ipam }} TEST_EGRESS=true
+    - run: make test-nodenet
+      timeout-minutes: 10
+    - run: make test-fou
+      timeout-minutes: 10
+    - run: make test-nat
+    - run: make test-integration
+    - run: make check-generate
+  e2e:
+    name: e2e ${{ matrix.kindest-node }} ${{ matrix.label }}
+    needs: test
+    strategy:
+      fail-fast: false
+      # Sparse matrix: K8S_LATEST covers representative scenarios;
+      # K8S_PREV1 / K8S_PREV2 only run a small set of API compatibility
+      # checks. originatingonly=true is exercised once per mode because
+      # its branch (v2/e2e/coil_test.go) is orthogonal to IP family and
+      # backend.
+      matrix:
+        include:
+        # K8S_LATEST: 15 scenarios
+        # Group A: IPAM mode (with-ipam=true, backend=iptables)
+        - { kindest-node: *k8s-latest, with-ipam: "true",  ipv4: "true",  ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam v4" }
+        - { kindest-node: *k8s-latest, with-ipam: "true",  ipv4: "false", ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam v6" }
+        - { kindest-node: *k8s-latest, with-ipam: "true",  ipv4: "true",  ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam dual" }
+        - { kindest-node: *k8s-latest, with-ipam: "true",  ipv4: "true",  ipv6: "true",  ipv6-primary: "true",  backend: "iptables", originatingonly: "false", label: "ipam dual-v6p" }
+        - { kindest-node: *k8s-latest, with-ipam: "true",  ipv4: "true",  ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "true",  label: "ipam v4 orig-only" }
+        # Group B: standalone egress with iptables backend
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "egress v4 iptables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "false", ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "egress v6 iptables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "egress dual iptables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "true",  ipv6-primary: "true",  backend: "iptables", originatingonly: "false", label: "egress dual-v6p iptables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "true",  ipv6-primary: "true",  backend: "iptables", originatingonly: "true",  label: "egress dual-v6p iptables orig-only" }
+        # Group C: standalone egress with nftables backend
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "false", ipv6-primary: "false", backend: "nftables", originatingonly: "false", label: "egress v4 nftables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "false", ipv6: "true",  ipv6-primary: "false", backend: "nftables", originatingonly: "false", label: "egress v6 nftables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "true",  ipv6-primary: "false", backend: "nftables", originatingonly: "false", label: "egress dual nftables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "true",  ipv6-primary: "true",  backend: "nftables", originatingonly: "false", label: "egress dual-v6p nftables" }
+        - { kindest-node: *k8s-latest, with-ipam: "false", ipv4: "true",  ipv6: "false", ipv6-primary: "false", backend: "nftables", originatingonly: "true",  label: "egress v4 nftables orig-only" }
+        # K8S_PREV1: 4 representative scenarios
+        - { kindest-node: *k8s-prev1,  with-ipam: "true",  ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam v4" }
+        - { kindest-node: *k8s-prev1,  with-ipam: "true",  ipv4: "true", ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam dual" }
+        - { kindest-node: *k8s-prev1,  with-ipam: "false", ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "egress v4 iptables" }
+        - { kindest-node: *k8s-prev1,  with-ipam: "false", ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "nftables", originatingonly: "false", label: "egress v4 nftables" }
+        # K8S_PREV2: 4 representative scenarios
+        - { kindest-node: *k8s-prev2, with-ipam: "true",  ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam v4" }
+        - { kindest-node: *k8s-prev2, with-ipam: "true",  ipv4: "true", ipv6: "true",  ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "ipam dual" }
+        - { kindest-node: *k8s-prev2, with-ipam: "false", ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "iptables", originatingonly: "false", label: "egress v4 iptables" }
+        - { kindest-node: *k8s-prev2, with-ipam: "false", ipv4: "true", ipv6: "false", ipv6-primary: "false", backend: "nftables", originatingonly: "false", label: "egress v4 nftables" }
+    runs-on: ubuntu-24.04
+    env:
+      KUBERNETES_VERSION: ${{ matrix.kindest-node }}
+      WITH_IPAM:          ${{ matrix.with-ipam }}
+      TEST_IPV4:          ${{ matrix.ipv4 }}
+      TEST_IPV6:          ${{ matrix.ipv6 }}
+      IPV6_PRIMARY:       ${{ matrix.ipv6-primary }}
+      BACKEND:            ${{ matrix.backend }}
+      ORIGINATINGONLY:    ${{ matrix.originatingonly }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.go-version }}
+        cache-dependency-path: "**/go.sum"
+    - uses: ./.github/actions/setup-takumi-guard
+      with:
+        bot-id: ${{ vars.TAKUMI_GUARD_BOT_ID }}
+    - uses: aquaproj/aqua-installer@82d0e83878a8657c4a6f2ff1755d3bfbfc67f329 # v4.1.0
+      with:
+        aqua_version: v2.64.0
+    - run: make image
+    - run: make certs
+    - run: make ci-enable-docker-ipv6
+      working-directory: v2/e2e
+    - run: make start
+      working-directory: v2/e2e
+    - run: make install-coil
+      working-directory: v2/e2e
+    - run: make test
+      working-directory: v2/e2e
+    - run: make logs
+      working-directory: v2/e2e
+      if: always()
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: logs-${{ matrix.kindest-node }}-ipam${{ matrix.with-ipam }}-v4${{ matrix.ipv4 }}-v6${{ matrix.ipv6 }}-v6p${{ matrix.ipv6-primary }}-${{ matrix.backend }}-oo${{ matrix.originatingonly }}.tar.gz
+        path: v2/e2e/logs.tar.gz
+  certs-generation:
+    name: Cert generation test
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        kindest-node: [*k8s-prev2, *k8s-prev1, *k8s-latest]
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: ${{ env.go-version }}
+        cache-dependency-path: "**/go.sum"
+    - uses: ./.github/actions/setup-takumi-guard
+      with:
+        bot-id: ${{ vars.TAKUMI_GUARD_BOT_ID }}
+    - uses: aquaproj/aqua-installer@82d0e83878a8657c4a6f2ff1755d3bfbfc67f329 # v4.1.0
+      with:
+        aqua_version: v2.64.0
+    - run: make image
+    - run: make enable-certs-rotation
+      working-directory: v2/e2e
+    - run: make start KUBERNETES_VERSION=${{ matrix.kindest-node }}
+      working-directory: v2/e2e
+    - run: make install-coil
+      working-directory: v2/e2e
+    - run: make test
+      working-directory: v2/e2e
+    - run: make logs
+      working-directory: v2/e2e
+      if: always()
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      if: always()
+      with:
+        name: logs-cert-generation-${{ matrix.kindest-node }}.tar.gz
+        path: v2/e2e/logs.tar.gz

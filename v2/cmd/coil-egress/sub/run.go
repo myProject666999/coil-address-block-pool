@@ -1,0 +1,146 @@
+package sub
+
+import (
+	"context"
+	"errors"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	v2 "github.com/cybozu-go/coil/v2"
+	"github.com/cybozu-go/coil/v2/controllers"
+	"github.com/cybozu-go/coil/v2/pkg/constants"
+	"github.com/cybozu-go/coil/v2/pkg/fou"
+	egressMetrics "github.com/cybozu-go/coil/v2/pkg/metrics"
+	"github.com/cybozu-go/coil/v2/pkg/nat/netfilter"
+)
+
+const (
+	gracefulTimeout = 5 * time.Second
+)
+
+var (
+	scheme   = runtime.NewScheme()
+	setupLog = ctrl.Log.WithName("setup")
+)
+
+func init() {
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+
+	// +kubebuilder:scaffold:scheme
+
+	metrics.Registry.MustRegister(egressMetrics.NfConntrackCount)
+	metrics.Registry.MustRegister(egressMetrics.NfConntrackLimit)
+	metrics.Registry.MustRegister(egressMetrics.NfTableMasqueradeBytes)
+	metrics.Registry.MustRegister(egressMetrics.NfTableMasqueradePackets)
+	metrics.Registry.MustRegister(egressMetrics.NfTableInvalidBytes)
+	metrics.Registry.MustRegister(egressMetrics.NfTableInvalidPackets)
+	metrics.Registry.MustRegister(egressMetrics.NfTablePeerSrcDroppedBytes)
+	metrics.Registry.MustRegister(egressMetrics.NfTablePeerSrcDroppedPackets)
+}
+
+func subMain() error {
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&config.zapOpts)))
+
+	myNS := os.Getenv(constants.EnvPodNamespace)
+	if myNS == "" {
+		return errors.New(constants.EnvPodNamespace + " environment variable must be set")
+	}
+
+	myName := os.Getenv(constants.EnvEgressName)
+	if myName == "" {
+		return errors.New(constants.EnvEgressName + " environment variable must be set")
+	}
+
+	myAddresses := strings.Split(os.Getenv(constants.EnvAddresses), ",")
+	if len(myAddresses) == 0 {
+		return errors.New(constants.EnvAddresses + " environment variable must be set")
+	}
+	var ipv4, ipv6 net.IP
+	protocolMap := make(map[string]struct{})
+	for _, addr := range myAddresses {
+		n := net.ParseIP(addr)
+		if n == nil {
+			return errors.New(constants.EnvAddresses + "contains invalid address: " + addr)
+		}
+		if n4 := n.To4(); n4 != nil {
+			ipv4 = n4
+			protocolMap[constants.FamilyIPv4] = struct{}{}
+		} else {
+			ipv6 = n
+			protocolMap[constants.FamilyIPv6] = struct{}{}
+		}
+	}
+
+	protocols := make([]string, 0)
+	for protocol := range protocolMap {
+		protocols = append(protocols, protocol)
+	}
+
+	setupLog.Info("detected local IP addresses", "ipv4", ipv4.String(), "ipv6", ipv6.String())
+
+	timeout := gracefulTimeout
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:         scheme,
+		LeaderElection: false,
+		Metrics: metricsserver.Options{
+			BindAddress: config.metricsAddr,
+		},
+		GracefulShutdownTimeout: &timeout,
+		HealthProbeBindAddress:  config.healthAddr,
+	})
+	if err != nil {
+		return err
+	}
+
+	setupLog.Info("initialize FoU tunnel", "port", config.port, "ipv4", ipv4.String(), "ipv6", ipv6.String())
+	ft := fou.NewServerFoUTunnel(config.port, ipv4, ipv6, nil)
+	if err := ft.Init(); err != nil {
+		return err
+	}
+
+	setupLog.Info("initialize Egress", "ipv4", ipv4.String(), "ipv6", ipv6.String(), "backend", config.backend)
+	nat, err := netfilter.NewNatServer("eth0", ipv4, ipv6, config.backend)
+	if err != nil {
+		return err
+	}
+
+	setupLog.Info("setup Pod watcher")
+	podSyncChecker, err := controllers.SetupPodWatcher(mgr, myNS, myName, ft, config.enableSportAuto, nat)
+	if err != nil {
+		return err
+	}
+	if err := mgr.AddHealthzCheck("ping", healthz.Ping); err != nil {
+		return err
+	}
+	if err := mgr.AddReadyzCheck("pod-sync", podSyncChecker); err != nil {
+		return err
+	}
+
+	setupLog.Info("setup egress metrics collector")
+	runner := egressMetrics.NewRunner()
+	egressCollector, err := egressMetrics.NewEgressCollector(myNS, os.Getenv("HOSTNAME"), myName, protocols)
+	if err != nil {
+		return err
+	}
+	runner.Register(egressCollector)
+	go runner.Run(context.Background())
+
+	setupLog.Info("starting manager", "version", v2.Version())
+	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+		setupLog.Error(err, "problem running manager")
+		return err
+	}
+
+	return nil
+}

@@ -1,0 +1,180 @@
+package main
+
+import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"math/big"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+var (
+	host         = flag.String("host", "coilv2-webhook-service.kube-system.svc", "TLS hostname")
+	validFor     = flag.Duration("duration", 36500*24*time.Hour, "Duration that certificate is valid for")
+	outDir       = flag.String("outdir", ".", "Directory where the certificate files are created")
+	commonName   = flag.String("cn", "coilv2-webhook-service", "Certificate common name")
+	outCert      = flag.String("certname", "cert.pem", "Certificate filename")
+	outKey       = flag.String("keyname", "key.pem", "Key filename")
+	authority    = flag.String("ca", "", "Certificate authority")
+	authorityKey = flag.String("cakey", "", "Certificate authority")
+)
+
+func main() {
+	flag.Parse()
+
+	var ca *x509.Certificate
+	var priv *rsa.PrivateKey
+	var err error
+	if *authority != "" {
+		if ca, priv, err = readCA(filepath.Join(*outDir, *authority), filepath.Join(*outDir, *authorityKey)); err != nil {
+			slog.Error("failed to read CA", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		priv, err = rsa.GenerateKey(rand.Reader, 4096)
+		if err != nil {
+			slog.Error("failed to generate key", "err", err)
+			os.Exit(1)
+		}
+	}
+
+	isCA := (ca == nil)
+
+	keyUsage := x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment
+	extKeyUsage := []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	if isCA {
+		keyUsage = x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign
+		extKeyUsage = append(extKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(*validFor)
+
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName: *commonName,
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              keyUsage,
+		ExtKeyUsage:           extKeyUsage,
+		BasicConstraintsValid: true,
+		IsCA:                  isCA,
+		DNSNames:              dnsAliases(*host),
+	}
+
+	parent := ca
+	if isCA {
+		parent = &template
+	}
+
+	certBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, priv.Public(), priv)
+	if err != nil {
+		slog.Error("failed to create certificate", "err", err)
+		os.Exit(1)
+	}
+
+	_, err = os.Stat(*outDir)
+	switch {
+	case err == nil:
+	case os.IsNotExist(err):
+		err = os.MkdirAll(*outDir, 0o755)
+		if err != nil {
+			slog.Error("failed to create output directory", "err", err)
+			os.Exit(1)
+		}
+	default:
+		slog.Error(fmt.Sprintf("stat %s failed", *outDir), "err", err)
+		os.Exit(1)
+	}
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		slog.Error("failed to marshal private key", "err", err)
+		os.Exit(1)
+	}
+
+	certFile := filepath.Join(*outDir, *outCert)
+	if err := outputPEM(certFile, "CERTIFICATE", certBytes); err != nil {
+		slog.Error("failed to output certificate", "file", certFile, "err", err)
+		os.Exit(1)
+	}
+	keyFile := filepath.Join(*outDir, *outKey)
+	if err := outputPEM(keyFile, "PRIVATE KEY", privBytes); err != nil {
+		slog.Error("failed to output private key", "file", keyFile, "err", err)
+		os.Exit(1)
+	}
+}
+
+func dnsAliases(host string) []string {
+	parts := strings.Split(host, ".")
+	aliases := make([]string, len(parts))
+	for i := range len(parts) {
+		aliases[i] = strings.Join(parts[0:len(parts)-i], ".")
+	}
+	return aliases
+}
+
+func outputPEM(fname string, pemType string, data []byte) error {
+	f, err := os.OpenFile(fname, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("failed to open: %w", err)
+	}
+	defer f.Close()
+
+	err = pem.Encode(f, &pem.Block{Type: pemType, Bytes: data})
+	if err != nil {
+		return fmt.Errorf("failed to encode: %w", err)
+	}
+
+	err = f.Sync()
+	if err != nil {
+		return fmt.Errorf("failed to fsync: %w", err)
+	}
+	return nil
+}
+
+func readCA(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	certFile, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error reading file '%s': %w", certPath, err)
+	}
+
+	caData, _ := pem.Decode(certFile)
+
+	ca, err := x509.ParseCertificate(caData.Bytes)
+	if err != nil {
+		slog.Error("failed to parse certificate", "err", err)
+		os.Exit(1)
+	}
+
+	keyFile, err := os.ReadFile(keyPath)
+	if err != nil {
+		slog.Error("failed to read key", "err", err)
+		os.Exit(1)
+	}
+
+	cakData, _ := pem.Decode(keyFile)
+	key, err := x509.ParsePKCS8PrivateKey(cakData.Bytes)
+	if err != nil {
+		slog.Error("faield to parse private key", "err", err)
+		os.Exit(1)
+	}
+
+	privateKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, nil, errors.New("type assertion error - object is not of type *rsa.PrivateKey")
+	}
+
+	return ca, privateKey, nil
+}

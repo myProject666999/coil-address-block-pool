@@ -1,0 +1,49 @@
+images:
+- name: coil
+  newTag: 2.15.0
+  newName: ghcr.io/cybozu-go/coil
+
+resources:
+- config/default
+# If you are using CKE (github.com/cybozu-go/cke) and want to use
+# its webhook installation feature, comment the above line and
+# uncomment the below line.
+#- config/cke
+
+# If you want to enable coil-router, uncomment the following line.
+# Note that coil-router can work only for clusters where all the
+# nodes are in a flat L2 network.
+#- config/pod/coil-router.yaml
+
+patchesStrategicMerge:
+# Uncomment the following if you want to run Coil with Calico network policy.
+# - config/pod/compat_calico.yaml
+
+# [CERTS] Following patches should be uncommented if automatic cert generation is used.
+# patches:
+# - path: config/pod/generate_certs.yaml
+#   target:
+#     group: apps
+#     version: v1
+#     kind: Deployment
+#     name: coil-ipam-controller
+# - path: config/pod/generate_certs.yaml
+#   target:
+#     group: apps
+#     version: v1
+#     kind: Deployment
+#     name: coil-egress-controller
+
+# Edit netconf.json to customize CNI configurations
+configMapGenerator:
+- name: coil-config
+  namespace: system
+  files:
+  - cni_netconf=./netconf.json
+
+# Adds namespace to all resources.
+namespace: kube-system
+
+# Labels to add to all resources and selectors.
+commonLabels:
+  app.kubernetes.io/name: coil

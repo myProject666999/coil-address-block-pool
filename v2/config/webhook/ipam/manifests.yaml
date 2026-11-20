@@ -1,0 +1,53 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-ipam-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: ipam-webhook-service
+      namespace: system
+      path: /mutate-coil-cybozu-com-v2-addresspool
+  failurePolicy: Fail
+  name: maddresspool.kb.io
+  rules:
+  - apiGroups:
+    - coil.cybozu.com
+    apiVersions:
+    - v2
+    operations:
+    - CREATE
+    resources:
+    - addresspools
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-ipam-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: ipam-webhook-service
+      namespace: system
+      path: /validate-coil-cybozu-com-v2-addresspool
+  failurePolicy: Fail
+  name: vaddresspool.kb.io
+  rules:
+  - apiGroups:
+    - coil.cybozu.com
+    apiVersions:
+    - v2
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - addresspools
+  sideEffects: None
