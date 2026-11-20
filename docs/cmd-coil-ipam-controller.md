@@ -24,6 +24,7 @@ address blocks from the requested pool.
 Flags:
       --cert-dir string                 directory to locate TLS certs for webhook (default "/certs")
       --gc-interval duration            garbage collection interval (default 1h0m0s)
+      --gc-pod-grace-period duration    grace period before blocks of a deleted node are reclaimed (default 5m0s)
       --health-addr string              bind address of health/readiness probes (default ":9387")
   -h, --help                            help for coil-ipam-controller
       --metrics-addr string             bind address of metrics endpoint (default ":9386")

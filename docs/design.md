@@ -342,6 +342,8 @@ For this purpose, Coil adds a finalizer to each `AddressBlock`.  **`coild` check
 
 `AddressBlock` should also be deleted when `Node` that acquired the block is deleted.  Since `coild` running as a DaemonSet pod cannot do this, **`coil-ipam-controller` watches Node deletions and removes `AddressBlocks`**.  `coil-ipam-controller` periodically checks dangling `AddressBlocks` and removes them.
 
+Reclamation is deliberately delayed rather than immediate.  When a block's Node has disappeared, the block first enters a persisted `PendingReclaim` state: its node label is removed and reclaim annotations are written, while the block keeps occupying its pool index so no other node can be handed the same addresses.  The block is deleted only after a configurable grace period (`--gc-pod-grace-period`) elapses and no non-terminal Pod still references the node.  A same-named node that re-registers inherits the block only when its UID matches the recorded one; a replacement node gets fresh blocks.  The full state transition table, occupancy evidence rules, and failure-mode decisions are documented in [address-block-gc.md](address-block-gc.md).
+
 `coild` also deletes `AddressBlock` when it frees the last IP address used in the block.  At startup, `coild` also checks each `AddressBlock` for the Node, and if no Pod is using the addresses in the block, it deletes the `AddressBlock`.
 
 Note that Coil does not include `Node` in the list of owner references of an `AddressBlock`.  This is because Kubernetes only deletes a resource after _all_ owners in the owner references of the resource are deleted.

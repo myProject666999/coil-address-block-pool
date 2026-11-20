@@ -15,7 +15,6 @@ import (
 
 var _ = Describe("AddressPool Webhook", func() {
 	ctx := context.TODO()
-
 	BeforeEach(func() {
 		r := &AddressPool{}
 		err := k8sClient.Get(ctx, client.ObjectKey{Name: "test"}, r)
@@ -150,6 +149,41 @@ var _ = Describe("AddressPool Webhook", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("should keep existing blocks stable when the pool prefix is expanded", func() {
+		r := &AddressPool{
+			Spec: AddressPoolSpec{
+				BlockSizeBits: 2,
+				Subnets:       []SubnetSet{makeSubnetSet("10.2.0.0/24", "")},
+			},
+		}
+		r.Name = "test"
+		Expect(k8sClient.Create(ctx, r)).NotTo(HaveOccurred())
+
+		// An existing block carved before the expansion must keep its index
+		// and CIDR after a subnet is appended.
+		old := &AddressBlock{}
+		old.Name = "test-3"
+		old.Index = 3
+		old.IPv4 = strPtr("10.2.0.12/30")
+		old.Labels = map[string]string{"coil.cybozu.com/pool": "test", "coil.cybozu.com/node": "node1"}
+		Expect(k8sClient.Create(ctx, old)).NotTo(HaveOccurred())
+
+		r.Spec.Subnets = append(r.Spec.Subnets, makeSubnetSet("10.3.0.0/24", ""))
+		Expect(k8sClient.Update(ctx, r)).NotTo(HaveOccurred())
+
+		got := &AddressBlock{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Name: "test-3"}, got)).To(Succeed())
+		Expect(got.Index).To(Equal(int32(3)))
+		Expect(got.IPv4).To(Equal(strPtr("10.2.0.12/30")))
+		Expect(got.Labels["coil.cybozu.com/node"]).To(Equal("node1"))
+
+		// The first block of the appended subnet belongs to 10.3.0.0/24,
+		// proving the expansion only adds higher indices and never shifts
+		// or overlaps already allocated blocks.
+		newBlock, _ := r.Spec.Subnets[1].GetBlock(0, 2)
+		Expect(newBlock.String()).To(Equal("10.3.0.0/30"))
+	})
+
 	It("should allow appending too small subnets", func() {
 		r := &AddressPool{
 			Spec: AddressPoolSpec{
@@ -224,3 +258,7 @@ var _ = Describe("AddressPool Webhook", func() {
 		Expect(err).To(HaveOccurred())
 	})
 })
+
+func strPtr(s string) *string {
+	return &s
+}

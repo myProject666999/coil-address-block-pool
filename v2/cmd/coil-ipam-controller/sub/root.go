@@ -15,12 +15,13 @@ import (
 )
 
 var config struct {
-	metricsAddr string
-	healthAddr  string
-	webhookAddr string
-	certDir     string
-	gcInterval  time.Duration
-	zapOpts     zap.Options
+	metricsAddr      string
+	healthAddr       string
+	webhookAddr      string
+	certDir          string
+	gcInterval       time.Duration
+	gcPodGracePeriod time.Duration
+	zapOpts          zap.Options
 
 	enableCertRotation         bool
 	enableRestartOnCertRefresh bool
@@ -53,6 +54,7 @@ func init() {
 	pf.StringVar(&config.webhookAddr, "webhook-addr", ":9443", "bind address of admission webhook")
 	pf.StringVar(&config.certDir, "cert-dir", "/certs", "directory to locate TLS certs for webhook")
 	pf.DurationVar(&config.gcInterval, "gc-interval", 1*time.Hour, "garbage collection interval")
+	pf.DurationVar(&config.gcPodGracePeriod, "gc-pod-grace-period", constants.DefaultGCPodGracePeriod, "grace period before blocks of a deleted node are reclaimed")
 	pf.BoolVar(&config.enableCertRotation, "enable-cert-rotation", constants.DefaultEnableCertRotation, "enables webhook's certificate generation")
 	pf.BoolVar(&config.enableRestartOnCertRefresh, "enable-restart-on-cert-refresh", constants.DefaultEnableRestartOnCertRefresh, "enables pod's restart on webhook certificate refresh")
 

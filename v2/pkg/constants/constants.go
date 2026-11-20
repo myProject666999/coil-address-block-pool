@@ -20,6 +20,29 @@ const (
 	LabelAppComponent = "app.kubernetes.io/component"
 )
 
+// Annotation keys used by the delayed block reclamation logic.
+//
+// A block whose owning Node has disappeared keeps its pool label but loses
+// its node label and enters the PendingReclaim state, fully described by
+// these annotations.  The state therefore survives controller restarts and
+// can be re-derived solely from the AddressBlock object.
+const (
+	// AnnNodeUID records the UID of the Node to which the block was allocated.
+	AnnNodeUID = "coil.cybozu.com/node-uid"
+
+	// AnnReclaimNode records the node name the block belonged to when it
+	// entered PendingReclaim (the node label is removed at that point).
+	AnnReclaimNode = "coil.cybozu.com/reclaim-node"
+
+	// AnnReclaimUID records the UID of the disappeared node, used to decide
+	// whether a same-named node that returns may inherit the block.
+	AnnReclaimUID = "coil.cybozu.com/reclaim-uid"
+
+	// AnnReclaimAt is the RFC3339 timestamp at which the grace period ends
+	// and the block becomes eligible for actual deletion.
+	AnnReclaimAt = "coil.cybozu.com/reclaim-at"
+)
+
 // Index keys
 const (
 	AddressBlockRequestKey = "address-block.request"
@@ -78,6 +101,10 @@ const (
 	DefaultEnableIPAM             = true
 	DefaultEnableEgress           = true
 	DefaultAddressBlockGCInterval = 5 * time.Minute
+
+	// DefaultGCPodGracePeriod is the default grace period a block whose node
+	// has disappeared stays in PendingReclaim before it may be deleted.
+	DefaultGCPodGracePeriod = 5 * time.Minute
 
 	DefaultEnableCertRotation         = false
 	DefaultEnableRestartOnCertRefresh = false

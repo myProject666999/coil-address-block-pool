@@ -141,7 +141,7 @@ func setupManager(ctx context.Context, mgr ctrl.Manager) error {
 
 	// other runners
 
-	gc := runners.NewGarbageCollector(mgr, ctrl.Log.WithName("gc"), config.gcInterval)
+	gc := runners.NewGarbageCollector(mgr, ctrl.Log.WithName("gc"), config.gcInterval, config.gcPodGracePeriod)
 	if err := mgr.Add(gc); err != nil {
 		return err
 	}

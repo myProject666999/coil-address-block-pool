@@ -36,7 +36,11 @@ type PoolManager interface {
 
 	// AllocateBlock carves an AddressBlock out of the pool for a node.
 	// If the pool runs out of the free blocks, this returns ErrNoBlock.
-	AllocateBlock(ctx context.Context, poolName, nodeName, requestUID string) (*coilv2.AddressBlock, error)
+	//
+	// nodeUID is the Node's UID; it is recorded on the block so that the
+	// garbage collector can tell a same-named but different node instance
+	// apart when the node disappears and later re-registers.
+	AllocateBlock(ctx context.Context, poolName, nodeName, nodeUID, requestUID string) (*coilv2.AddressBlock, error)
 
 	// IsUsed returns true if a pool is used by some AddressBlock.
 	IsUsed(ctx context.Context, name string) (bool, error)
@@ -136,12 +140,12 @@ func (pm *poolManager) SyncPool(ctx context.Context, name string) error {
 	return p.SyncBlocks(ctx)
 }
 
-func (pm *poolManager) AllocateBlock(ctx context.Context, poolName, nodeName, requestUID string) (*coilv2.AddressBlock, error) {
+func (pm *poolManager) AllocateBlock(ctx context.Context, poolName, nodeName, nodeUID, requestUID string) (*coilv2.AddressBlock, error) {
 	p, err := pm.getPool(ctx, poolName)
 	if err != nil {
 		return nil, err
 	}
-	return p.AllocateBlock(ctx, nodeName, requestUID)
+	return p.AllocateBlock(ctx, nodeName, nodeUID, requestUID)
 }
 
 func (pm *poolManager) IsUsed(ctx context.Context, name string) (bool, error) {
@@ -214,7 +218,7 @@ func (p *pool) SyncBlocks(ctx context.Context) error {
 
 // AllocateBlock creates an AddressBlock and returns it.
 // If the pool runs out of the free blocks, this returns ErrNoBlock.
-func (p *pool) AllocateBlock(ctx context.Context, nodeName, requestUID string) (*coilv2.AddressBlock, error) {
+func (p *pool) AllocateBlock(ctx context.Context, nodeName, nodeUID, requestUID string) (*coilv2.AddressBlock, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -261,6 +265,9 @@ func (p *pool) AllocateBlock(ctx context.Context, nodeName, requestUID string) (
 			constants.LabelPool:    p.name,
 			constants.LabelNode:    nodeName,
 			constants.LabelRequest: requestUID,
+		}
+		r.Annotations = map[string]string{
+			constants.AnnNodeUID: nodeUID,
 		}
 		controllerutil.AddFinalizer(r, constants.FinCoil)
 		r.Index = int32(nextIndex)

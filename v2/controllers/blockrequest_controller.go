@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,7 +64,7 @@ func (r *BlockRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	block, err := r.Manager.AllocateBlock(ctx, br.Spec.PoolName, br.Spec.NodeName, string(br.UID))
+	block, err := r.allocateForRequest(ctx, br)
 	if errors.Is(err, ipam.ErrNoBlock) {
 		logger.Error(err, "out of blocks", "pool", br.Spec.PoolName)
 
@@ -106,6 +107,28 @@ func (r *BlockRequestReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// allocateForRequest resolves the current UID of the requesting Node and
+// carves a block for it.  The UID is recorded on the block so that the
+// garbage collector can distinguish a same-named replacement node.
+//
+// If the Node cannot be read, allocation still proceeds with an empty UID
+// rather than failing the request: the block remains valid, and the garbage
+// collector will backfill the UID while the node exists, or conservatively
+// refuse same-name inheritance if the node has already vanished.
+func (r *BlockRequestReconciler) allocateForRequest(ctx context.Context, br *coilv2.BlockRequest) (*coilv2.AddressBlock, error) {
+	nodeUID := ""
+	node := &corev1.Node{}
+	if err := r.Client.Get(ctx, client.ObjectKey{Name: br.Spec.NodeName}, node); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get Node %s for block request: %w", br.Spec.NodeName, err)
+		}
+		log.FromContext(ctx).Info("requesting node not found; allocating block without node UID", "node", br.Spec.NodeName)
+	} else {
+		nodeUID = string(node.UID)
+	}
+	return r.Manager.AllocateBlock(ctx, br.Spec.PoolName, br.Spec.NodeName, nodeUID, string(br.UID))
 }
 
 func (r *BlockRequestReconciler) updateStatus(ctx context.Context, br *coilv2.BlockRequest, blockName string) error {
